@@ -86,8 +86,8 @@ module FakeS3
         #real_obj.content_type = metadata.fetch(:content_type) { "application/octet-stream" }
         real_obj.content_type = request.query['response-content-type'] || metadata.fetch(:content_type) { "application/octet-stream" }
         real_obj.content_disposition = request.query['response-content-disposition'] || metadata[:content_disposition]
-        #real_obj.io = File.open(File.join(obj_root,"content"),'rb')
-        real_obj.io = RateLimitableFile.open(File.join(obj_root,"content"),'rb') { |io| io.read }
+        real_obj.io = File.open(File.join(obj_root,"content"),'rb')
+        #real_obj.io = RateLimitableFile.open(File.join(obj_root,"content"),'rb')
         real_obj.size = metadata.fetch(:size) { 0 }
         real_obj.creation_date = File.ctime(obj_root).utc.iso8601(SUBSECOND_PRECISION)
         real_obj.modified_date = metadata.fetch(:modified_date) do
