@@ -86,8 +86,8 @@ module FakeS3
         #real_obj.content_type = metadata.fetch(:content_type) { "application/octet-stream" }
         real_obj.content_type = request.query['response-content-type'] || metadata.fetch(:content_type) { "application/octet-stream" }
         real_obj.content_disposition = request.query['response-content-disposition'] || metadata[:content_disposition]
-        real_obj.io = File.open(File.join(obj_root,"content"),'rb')
-        #real_obj.io = RateLimitableFile.open(File.join(obj_root,"content"),'rb')
+        #real_obj.io = File.open(File.join(obj_root,"content"),'rb')
+        real_obj.io = RateLimitableFile.open(File.join(obj_root,"content"),'rb')
         real_obj.size = metadata.fetch(:size) { 0 }
         real_obj.creation_date = File.ctime(obj_root).utc.iso8601(SUBSECOND_PRECISION)
         real_obj.modified_date = metadata.fetch(:modified_date) do
@@ -182,7 +182,7 @@ module FakeS3
       do_store_object(bucket, object_name, filedata, request)
     end
 
-    def do_store_object(bucket, object_name, filedata, request)
+    def do_store_object(bucket, object_name, filedata, request, upload_id=false)
       begin
         filename = File.join(@root,bucket.name,object_name)
         FileUtils.mkdir_p(filename)
@@ -195,7 +195,7 @@ module FakeS3
 
         File.open(content,'wb') { |f| f << filedata }
 
-        metadata_struct = create_metadata(content,request)
+        metadata_struct = create_metadata(content, request, upload_id)
         File.open(metadata,'w') do |f|
           f << YAML::dump(metadata_struct)
         end
@@ -237,11 +237,16 @@ module FakeS3
         part_paths    << part_path
       end
 
-      object = do_store_object(bucket, object_name, complete_file, request)
+      object = do_store_object(bucket, object_name, complete_file, request, upload_id)
 
       # clean up parts
-      part_paths.each do |path|
-        FileUtils.remove_dir(path)
+      #part_paths.each do |path|
+      #  FileUtils.remove_dir(path)
+      #end
+      key_prefix = object_name.split("/", 2)[0]
+      part_tmp_dir = File.join(upload_path, "#{upload_id}_#{key_prefix}")
+      if File.exist?(part_tmp_dir)
+        FileUtils.remove_dir(part_tmp_dir)
       end
 
       object
@@ -261,13 +266,27 @@ module FakeS3
     end
 
     # TODO: abstract getting meta data from request.
-    def create_metadata(content,request)
+    def create_metadata(content,request,upload_id=false)
       metadata = {}
       metadata[:md5] = Digest::MD5.file(content).hexdigest
-      metadata[:content_type] = request.header["content-type"].first
-      if request.header['content-disposition']
+
+      if upload_id
+        tmpfile = File.join(".", upload_id)
+        fh = File.open(tmpfile)
+        value = YAML::load(fh)
+        fh.close
+        metadata[:content_type] = value[:content_type]
+        if value[:content_disposition] != nil
+          metadata[:content_disposition] = value[:content_disposition]
+        end
+        File.delete(tmpfile)
+      else
+        metadata[:content_type] = request.header["content-type"].first
+        if request.header['content-disposition']
           metadata[:content_disposition] = request.header['content-disposition'].first
+        end
       end
+
       metadata[:size] = File.size(content)
       metadata[:modified_date] = File.mtime(content).utc.iso8601(SUBSECOND_PRECISION)
       metadata[:amazon_metadata] = {}

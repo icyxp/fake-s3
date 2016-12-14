@@ -238,6 +238,17 @@ module FakeS3
       if query.has_key?('uploads')
         upload_id = SecureRandom.hex
 
+        metadata = {}
+        metadata[:content_type] = request.header["content-type"].first
+        if request.header['content-disposition']
+          metadata[:content_disposition] = request.header['content-disposition'].first
+        end
+
+        tmpfile = File.join(".", upload_id)
+        File.open(tmpfile,'w') do |f|
+          f << YAML::dump(metadata)
+        end
+
         response.body = <<-eos.strip
           <?xml version="1.0" encoding="UTF-8"?>
           <InitiateMultipartUploadResult>
