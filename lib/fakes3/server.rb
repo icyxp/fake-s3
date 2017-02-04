@@ -117,7 +117,14 @@ module FakeS3
 
         response.status = 200
         response['Content-Type'] = real_obj.content_type
-        response['Content-Disposition'] = real_obj.content_disposition if real_obj.content_disposition
+
+        # implement for override content-disposition
+        if request.query.key?("response-content-disposition")
+          response['Content-Disposition'] = request.query["response-content-disposition"]
+        else
+          response['Content-Disposition'] = real_obj.content_disposition if real_obj.content_disposition
+        end
+
         stat = File::Stat.new(real_obj.io.path)
 
         response['Last-Modified'] = Time.iso8601(real_obj.modified_date).httpdate()
