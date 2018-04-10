@@ -4,8 +4,11 @@ require 'webrick/https'
 require 'openssl'
 require 'securerandom'
 require 'cgi'
+require 'uri'
+require 'fakes3/util'
 require 'fakes3/file_store'
 require 'fakes3/xml_adapter'
+require 'fakes3/xml_parser'
 require 'fakes3/bucket_query'
 require 'fakes3/unsupported_operation'
 require 'fakes3/errors'
@@ -25,10 +28,11 @@ module FakeS3
     MOVE = "MOVE"
     DELETE_OBJECT = "DELETE_OBJECT"
     DELETE_BUCKET = "DELETE_BUCKET"
+    DELETE_OBJECTS = "DELETE_OBJECTS"
 
-    attr_accessor :bucket,:object,:type,:src_bucket,
-                  :src_object,:method,:webrick_request,
-                  :path,:is_path_style,:query,:http_verb
+    attr_accessor :bucket, :object, :type, :src_bucket,
+                  :src_object, :method, :webrick_request,
+                  :path, :is_path_style, :query, :http_verb
 
     def inspect
       puts "-----Inspect FakeS3 Request"
@@ -45,12 +49,19 @@ module FakeS3
   end
 
   class Servlet < WEBrick::HTTPServlet::AbstractServlet
-    def initialize(server,store,hostname)
+    def initialize(server,store,hostname,cors_options)
       super(server)
       @store = store
       @hostname = hostname
       @port = server.config[:Port]
       @root_hostnames = [hostname,'localhost','s3.amazonaws.com','s3.localhost']
+
+      # Here lies hard-coded defaults for CORS Configuration
+      @cors_allow_origin = (cors_options['allow_origin'] or '*')
+      @cors_allow_methods = (cors_options['allow_methods'] or 'PUT, POST, HEAD, GET, OPTIONS')
+      @cors_preflight_allow_headers = (cors_options['preflight_allow_headers'] or 'Accept, Content-Type, Authorization, Content-Length, ETag, X-CSRF-Token, Content-Disposition')
+      @cors_post_put_allow_headers = (cors_options['post_put_allow_headers'] or 'Authorization, Content-Length')
+      @cors_expose_headers = (cors_options['expose_headers'] or 'ETag')
     end
 
     def validate_request(request)
@@ -89,14 +100,15 @@ module FakeS3
         end
       when 'GET_ACL'
         response.status = 200
-        response.body = XmlAdapter.acl()
+        response.body = XmlAdapter.acl
         response['Content-Type'] = 'application/xml'
       when 'GET'
-        real_obj = @store.get_object(s_req.bucket,s_req.object,request)
+        real_obj = @store.get_object(s_req.bucket, s_req.object, request)
         if !real_obj
           response.status = 404
           response.body = XmlAdapter.error_no_such_key(s_req.object)
           response['Content-Type'] = "application/xml"
+          response['Access-Control-Allow-Origin'] = @cors_allow_origin
           return
         end
 
@@ -118,29 +130,29 @@ module FakeS3
         response.status = 200
         response['Content-Type'] = real_obj.content_type
 
-        # implement for override content-disposition
-        if request.query.key?("response-content-disposition")
-          response['Content-Disposition'] = request.query["response-content-disposition"]
-        else
-          response['Content-Disposition'] = real_obj.content_disposition if real_obj.content_disposition
+        if real_obj.content_encoding
+          response.header['X-Content-Encoding'] = real_obj.content_encoding
+          response.header['Content-Encoding'] = real_obj.content_encoding
         end
 
-        stat = File::Stat.new(real_obj.io.path)
+        response['Content-Disposition'] = real_obj.content_disposition ? real_obj.content_disposition : 'attachment'
 
-        response['Last-Modified'] = Time.iso8601(real_obj.modified_date).httpdate()
+        response['Last-Modified'] = Time.iso8601(real_obj.modified_date).httpdate
         response.header['ETag'] = "\"#{real_obj.md5}\""
         response['Accept-Ranges'] = "bytes"
         response['Last-Ranges'] = "bytes"
-        response['Access-Control-Allow-Origin'] = '*'
+        response['Access-Control-Allow-Origin'] = @cors_allow_origin
 
         real_obj.custom_metadata.each do |header, value|
           response.header['x-amz-meta-' + header] = value
         end
 
+        stat = File::Stat.new(real_obj.io.path)
         content_length = stat.size
 
         # Added Range Query support
-        if range = request.header["range"].first
+        range = request.header["range"].first
+        if range
           response.status = 206
           if range =~ /bytes=(\d*)-(\d*)/
             start = $1.to_i
@@ -163,8 +175,13 @@ module FakeS3
         response['Content-Length'] = File::Stat.new(real_obj.io.path).size
         if s_req.http_verb == 'HEAD'
           response.body = ""
+	        real_obj.io.close
         else
           response.body = real_obj.io
+        end
+
+        if real_obj.cache_control
+          response['Cache-Control'] = real_obj.cache_control
         end
       end
     end
@@ -178,11 +195,11 @@ module FakeS3
       response.status = 200
       response.body = ""
       response['Content-Type'] = "text/xml"
-      response['Access-Control-Allow-Origin'] = '*'
+      response['Access-Control-Allow-Origin'] = @cors_allow_origin
 
       case s_req.type
       when Request::COPY
-        object = @store.copy_object(s_req.src_bucket,s_req.src_object,s_req.bucket,s_req.object,request)
+        object = @store.copy_object(s_req.src_bucket, s_req.src_object, s_req.bucket, s_req.object, request)
         response.body = XmlAdapter.copy_object_result(object)
       when Request::STORE
         bucket_obj = @store.get_bucket(s_req.bucket)
@@ -191,7 +208,7 @@ module FakeS3
           bucket_obj = @store.create_bucket(s_req.bucket)
         end
 
-        real_obj = @store.store_object(bucket_obj,s_req.object,s_req.webrick_request)
+        real_obj = @store.store_object(bucket_obj, s_req.object, s_req.webrick_request)
         response.header['ETag'] = "\"#{real_obj.md5}\""
       when Request::CREATE_BUCKET
         @store.create_bucket(s_req.bucket)
@@ -230,14 +247,18 @@ module FakeS3
         response.header['ETag']  = "\"#{real_obj.md5}\""
       end
 
-      response['Access-Control-Allow-Origin']   = '*'
-      response['Access-Control-Allow-Headers']  = 'Authorization, Content-Length'
-      response['Access-Control-Expose-Headers'] = 'ETag'
+      response['Access-Control-Allow-Origin']   = @cors_allow_origin
+      response['Access-Control-Allow-Headers']  = @cors_post_put_allow_headers
+      response['Access-Control-Expose-Headers'] = @cors_expose_headers
 
       response.status = 200
     end
 
     def do_POST(request,response)
+      if request.query_string === 'delete'
+        return do_DELETE(request, response)
+      end
+
       s_req = normalize_request(request)
       key   = request.query['key']
       query = CGI::parse(request.request_uri.query || "")
@@ -292,9 +313,14 @@ module FakeS3
         response['Etag'] = "\"#{real_obj.md5}\""
 
         if success_action_redirect
-          response.status      = 307
+          object_params = [ [ :bucket, s_req.bucket ], [ :key, key ] ]
+          location_uri = URI.parse(success_action_redirect)
+          original_location_params = URI.decode_www_form(String(location_uri.query))
+          location_uri.query = URI.encode_www_form(original_location_params + object_params)
+
+          response.status      = 303
           response.body        = ""
-          response['Location'] = success_action_redirect
+          response['Location'] = location_uri.to_s
         else
           response.status = success_action_status || 204
           if response.status == "201"
@@ -314,15 +340,19 @@ module FakeS3
       end
 
       response['Content-Type']                  = 'text/xml'
-      response['Access-Control-Allow-Origin']   = '*'
-      response['Access-Control-Allow-Headers']  = 'Authorization, Content-Length'
-      response['Access-Control-Expose-Headers'] = 'ETag'
+      response['Access-Control-Allow-Origin']   = @cors_allow_origin
+      response['Access-Control-Allow-Headers']  = @cors_post_put_allow_headers
+      response['Access-Control-Expose-Headers'] = @cors_expose_headers
     end
 
     def do_DELETE(request, response)
       s_req = normalize_request(request)
 
       case s_req.type
+      when Request::DELETE_OBJECTS
+        bucket_obj = @store.get_bucket(s_req.bucket)
+        keys = XmlParser.delete_objects(s_req.webrick_request)
+        @store.delete_objects(bucket_obj,keys,s_req.webrick_request)
       when Request::DELETE_OBJECT
         bucket_obj = @store.get_bucket(s_req.bucket)
         @store.delete_object(bucket_obj,s_req.object,s_req.webrick_request)
@@ -336,11 +366,10 @@ module FakeS3
 
     def do_OPTIONS(request, response)
       super
-
-      response['Access-Control-Allow-Origin']   = '*'
-      response['Access-Control-Allow-Methods']  = 'PUT, POST, HEAD, GET, OPTIONS'
-      response['Access-Control-Allow-Headers']  = 'Accept, Content-Type, Authorization, Content-Length, ETag, Content-Disposition'
-      response['Access-Control-Expose-Headers'] = 'ETag'
+      response['Access-Control-Allow-Origin']   = @cors_allow_origin
+      response['Access-Control-Allow-Methods']  = @cors_allow_methods
+      response['Access-Control-Allow-Headers']  = @cors_preflight_allow_headers
+      response['Access-Control-Expose-Headers'] = @cors_expose_headers
     end
 
     private
@@ -360,10 +389,13 @@ module FakeS3
         end
 
         if elems.size == 0
-          raise UnsupportedOperation
-        elsif elems.size == 1
-          s_req.type = Request::DELETE_BUCKET
+          s_req.type = Request::DELETE_OBJECTS
           s_req.query = query
+          s_req.webrick_request = webrick_req
+        elsif elems.size == 1
+          s_req.type = webrick_req.query_string == 'delete' ? Request::DELETE_OBJECTS : Request::DELETE_BUCKET
+          s_req.query = query
+          s_req.webrick_request = webrick_req
         else
           s_req.type = Request::DELETE_OBJECT
           object = elems[1,elems.size].join('/')
@@ -436,7 +468,8 @@ module FakeS3
       # for multipart copy
       copy_source = webrick_req.header["x-amz-copy-source"]
       if copy_source and copy_source.size == 1
-        src_elems   = copy_source.first.split("/")
+        copy_source = URI.unescape copy_source.first
+        src_elems   = copy_source.split("/")
         root_offset = src_elems[0] == "" ? 1 : 0
         s_req.src_bucket = src_elems[root_offset]
         s_req.src_object = src_elems[1 + root_offset,src_elems.size].join("/")
@@ -486,7 +519,11 @@ module FakeS3
       when 'DELETE'
         normalize_delete(webrick_req,s_req)
       when 'POST'
-        normalize_post(webrick_req,s_req)
+        if webrick_req.query_string != 'delete'
+          normalize_post(webrick_req,s_req)
+        else
+          normalize_delete(webrick_req,s_req)
+        end
       else
         raise "Unknown Request"
       end
@@ -500,13 +537,13 @@ module FakeS3
       parts_xml   = ""
       request.body { |chunk| parts_xml << chunk }
 
-      # TODO: I suck at parsing xml
-      parts_xml = parts_xml.scan /\<Part\>.*?<\/Part\>/m
+      # TODO: improve parsing xml
+      parts_xml = parts_xml.scan(/<Part>.*?<\/Part>/m)
 
       parts_xml.collect do |xml|
         {
-          number: xml[/\<PartNumber\>(\d+)\<\/PartNumber\>/, 1].to_i,
-          etag:   xml[/\<ETag\>\"(.+)\"\<\/ETag\>/, 1]
+          number: xml[/<PartNumber>(\d+)<\/PartNumber>/, 1].to_i,
+          etag:   FakeS3::Util.strip_before_and_after(xml[/\<ETag\>(.+)<\/ETag>/, 1], '"')
         }
       end
     end
@@ -531,6 +568,7 @@ module FakeS3
       @hostname = hostname
       @ssl_cert_path = ssl_cert_path
       @ssl_key_path = ssl_key_path
+      @cors_options = extra_options[:cors_options] or {}
       webrick_config = {
         :BindAddress => @address,
         :Port => @port
@@ -556,7 +594,7 @@ module FakeS3
     end
 
     def serve
-      @server.mount "/", Servlet, @store, @hostname
+      @server.mount "/", Servlet, @store, @hostname, @cors_options
       shutdown = proc { @server.shutdown }
       trap "INT", &shutdown
       trap "TERM", &shutdown
