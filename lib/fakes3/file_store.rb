@@ -89,7 +89,7 @@ module FakeS3
           metadata.fetch(:content_type) { "application/octet-stream" }
         real_obj.content_disposition = request.query['response-content-disposition'] ||
           metadata[:content_disposition]
-        real_obj.content_encoding = metadata.fetch(:content_encoding) # if metadata.fetch(:content_encoding)
+        real_obj.content_encoding = metadata.fetch(:content_encoding, "") # if metadata.fetch(:content_encoding)
         real_obj.io = RateLimitableFile.open(File.join(obj_root, "content"), 'rb')
         real_obj.size = metadata.fetch(:size) { 0 }
         real_obj.creation_date = File.ctime(obj_root).utc.iso8601(SUBSECOND_PRECISION)
@@ -156,7 +156,7 @@ module FakeS3
       obj.md5 = src_metadata[:md5]
       obj.content_type = src_metadata[:content_type]
       obj.content_disposition = src_metadata[:content_disposition]
-      obj.content_encoding = src_metadata[:content_encoding] # if src_metadata[:content_encoding]
+      obj.content_encoding = src_metadata.fetch(:content_encoding, "") # if src_metadata[:content_encoding]
       obj.size = src_metadata[:size]
       obj.modified_date = src_metadata[:modified_date]
       obj.cache_control = src_metadata[:cache_control]
