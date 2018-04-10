@@ -130,7 +130,7 @@ module FakeS3
         response.status = 200
         response['Content-Type'] = real_obj.content_type
 
-        if real_obj.key?(:content_encoding)
+        if real_obj.content_encoding
           response.header['X-Content-Encoding'] = real_obj.content_encoding
           response.header['Content-Encoding'] = real_obj.content_encoding
         end
