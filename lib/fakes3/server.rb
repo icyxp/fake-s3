@@ -135,7 +135,11 @@ module FakeS3
           response.header['Content-Encoding'] = real_obj.content_encoding
         end
 
-        response['Content-Disposition'] = real_obj.content_disposition ? real_obj.content_disposition : 'attachment'
+        if request.query["response-content-disposition"]
+          response['Content-Disposition'] = request.query["response-content-disposition"]
+        else
+          response['Content-Disposition'] = real_obj.content_disposition ? real_obj.content_disposition : 'attachment'
+        end
 
         response['Last-Modified'] = Time.iso8601(real_obj.modified_date).httpdate
         response.header['ETag'] = "\"#{real_obj.md5}\""
