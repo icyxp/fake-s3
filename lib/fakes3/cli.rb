@@ -20,13 +20,14 @@ module FakeS3
     method_option :corspreflightallowheaders, :type => :string, :desc => 'Access-Control-Allow-Headers header return value for preflight OPTIONS requests'
     method_option :corspostputallowheaders, :type => :string, :desc => 'Access-Control-Allow-Headers header return value for POST and PUT requests'
     method_option :corsexposeheaders, :type => :string, :desc => 'Access-Control-Expose-Headers header return value'
+    method_option :enable_remove_bucket, :type => :boolean, :desc => "Enable to remove bucket.Default false."
 
     def server
       store = nil
       if options[:root]
         root = File.expand_path(options[:root])
         # TODO Do some sanity checking here
-        store = FileStore.new(root, !!options[:quiet])
+        store = FileStore.new(root, !!options[:quiet], !!options[:enable_remove_bucket])
       end
 
       if store.nil?

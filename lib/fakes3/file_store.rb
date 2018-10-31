@@ -16,11 +16,12 @@ module FakeS3
     # sub second precision.
     SUBSECOND_PRECISION = 3
 
-    def initialize(root, quiet_mode)
+    def initialize(root, quiet_mode, enable_remove_bucket)
       @root = root
       @buckets = []
       @bucket_hash = {}
       @quiet_mode = quiet_mode
+      @enable_remove_bucket = enable_remove_bucket
       Dir[File.join(root,"*")].each do |bucket|
         bucket_name = File.basename(bucket)
         bucket_obj = Bucket.new(bucket_name,Time.now,[])
@@ -71,11 +72,13 @@ module FakeS3
     end
 
     def delete_bucket(bucket_name)
-      bucket = get_bucket(bucket_name)
-      raise NoSuchBucket if !bucket
-      raise BucketNotEmpty if bucket.objects.count > 0
-      FileUtils.rm_r(get_bucket_folder(bucket))
-      @bucket_hash.delete(bucket_name)
+      if @enable_remove_bucket
+        bucket = get_bucket(bucket_name)
+        raise NoSuchBucket if !bucket
+        raise BucketNotEmpty if bucket.objects.count > 0
+        FileUtils.rm_r(get_bucket_folder(bucket))
+        @bucket_hash.delete(bucket_name)
+      end
     end
 
     def get_object(bucket, object_name, request)
@@ -266,6 +269,10 @@ module FakeS3
 
     def delete_object(bucket,object_name,request)
       begin
+        existedObject = get_object(bucket.name, object_name, request)
+        if existedObject == nil
+          return nil
+        end
         filename = File.join(@root,bucket.name,object_name)
         FileUtils.rm_rf(filename)
         object = bucket.find(object_name)
@@ -281,6 +288,8 @@ module FakeS3
       begin
         filenames = []
         objects.each do |object_name|
+          existedObject = get_object(bucket.name, object_name, request)
+          next if existedObject == nil
           filenames << File.join(@root,bucket.name,object_name)
           object = bucket.find(object_name)
           bucket.remove(object)
